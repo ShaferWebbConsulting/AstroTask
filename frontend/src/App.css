@@ -1,0 +1,62 @@
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 1rem;
+  font-family: Inter, Arial, sans-serif;
+}
+
+.subtitle {
+  margin-top: -0.5rem;
+  color: #4b5563;
+}
+
+.panel {
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+  background: #fff;
+}
+
+.row,
+.grid {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.row {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.grid {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+}
+
+input,
+select,
+button {
+  padding: 0.5rem;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  border: 1px solid #e5e7eb;
+  padding: 0.5rem;
+  text-align: left;
+}
+
+.message {
+  font-weight: 600;
+}
