@@ -1,7 +1,17 @@
 import { useMemo, useState } from 'react'
 import './App.css'
-
-const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'
+import { createApiClient, ApiError } from './api/client.js'
+import AppShell from './components/AppShell.jsx'
+import LoginPanel from './components/LoginPanel.jsx'
+import MetricsRow from './components/MetricsRow.jsx'
+import SecurityPostureCard from './components/SecurityPostureCard.jsx'
+import ProviderHealthPanel from './components/ProviderHealthPanel.jsx'
+import ArchitectureFlow from './components/ArchitectureFlow.jsx'
+import TaskRequestForm from './components/TaskRequestForm.jsx'
+import TaskTable from './components/TaskTable.jsx'
+import TaskDetailDrawer from './components/TaskDetailDrawer.jsx'
+import AuditPanel from './components/AuditPanel.jsx'
+import Alert, { alertFromError, alertFromSubmission } from './components/Alert.jsx'
 
 const defaultTask = {
   target_latitude: '36.7',
@@ -21,160 +31,194 @@ function App() {
   const [token, setToken] = useState('')
   const [role, setRole] = useState('')
   const [tasks, setTasks] = useState([])
+  const [taskDetails, setTaskDetails] = useState({}) // task_id -> real data captured at submission time
   const [audit, setAudit] = useState(null)
-  const [message, setMessage] = useState('')
+  const [auditVerifiedAt, setAuditVerifiedAt] = useState(null)
+
+  const [loggingIn, setLoggingIn] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
+  const [loadingTasks, setLoadingTasks] = useState(false)
+  const [verifyingAudit, setVerifyingAudit] = useState(false)
+  const [actingTaskId, setActingTaskId] = useState('')
+  const [tasksError, setTasksError] = useState('')
+  const [auditError, setAuditError] = useState('')
+
+  const [alertState, setAlertState] = useState(null)
+  const [selectedTaskId, setSelectedTaskId] = useState('')
+
+  const api = useMemo(() => createApiClient({ getToken: () => token }), [token])
 
   const canApprove = useMemo(() => ['ISRApprover', 'Admin', 'SecurityOfficer'].includes(role), [role])
 
-  const request = async (path, options = {}) => {
-    const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) }
-    if (token) headers.Authorization = ['Bearer', token].join(' ')
-    const res = await fetch(`${apiBase}${path}`, { ...options, headers })
-    const data = await res.json().catch(() => ({}))
-    if (!res.ok) throw new Error(data.message || JSON.stringify(data) || `HTTP ${res.status}`)
-    return data
-  }
-
   const login = async () => {
+    setLoggingIn(true)
+    setAlertState(null)
     try {
-      const data = await request('/auth/login', { method: 'POST', body: JSON.stringify(credentials) })
+      const data = await api.login(credentials)
       setToken(data.token)
       setRole(data.role)
-      setMessage(`Logged in as ${data.role}`)
+      setAlertState({ tone: 'success', title: 'Signed in', message: `Authenticated as ${data.role}.` })
     } catch (err) {
-      setMessage(`Login failed: ${err.message}`)
+      setAlertState(alertFromError(err))
+    } finally {
+      setLoggingIn(false)
     }
   }
 
-  const submitTask = async (e) => {
-    e.preventDefault()
+  const logout = () => {
+    setToken('')
+    setRole('')
+    setTasks([])
+    setAudit(null)
+    setAlertState(null)
+  }
+
+  const refreshTasks = async () => {
+    setLoadingTasks(true)
+    setTasksError('')
+    try {
+      const data = await api.listTasks()
+      setTasks(data)
+    } catch (err) {
+      setTasksError(err.message)
+    } finally {
+      setLoadingTasks(false)
+    }
+  }
+
+  const verifyAudit = async () => {
+    setVerifyingAudit(true)
+    setAuditError('')
+    try {
+      const data = await api.verifyAudit()
+      setAudit(data)
+      setAuditVerifiedAt(new Date().toISOString())
+    } catch (err) {
+      setAuditError(err.message)
+    } finally {
+      setVerifyingAudit(false)
+    }
+  }
+
+  const submitTask = async () => {
+    setSubmitting(true)
+    setAlertState(null)
     try {
       const payload = {
         ...taskForm,
         target_latitude: Number(taskForm.target_latitude),
         target_longitude: Number(taskForm.target_longitude),
       }
-      const data = await request('/tasks', { method: 'POST', body: JSON.stringify(payload) })
-      setMessage(`Task ${data.task_id} processed as ${data.policy_decision}`)
+      const data = await api.submitTask(payload)
+      // Merge the real submitted payload with the real backend response so the detail drawer
+      // can show full context without inventing simulated values for this task.
+      setTaskDetails((prev) => ({ ...prev, [data.task_id]: { ...payload, ...data } }))
+      setAlertState(alertFromSubmission(data))
       await refreshTasks()
       await verifyAudit()
     } catch (err) {
-      setMessage(`Submit failed: ${err.message}`)
-    }
-  }
-
-  const refreshTasks = async () => {
-    try {
-      const data = await request('/tasks')
-      setTasks(data)
-    } catch (err) {
-      setMessage(`Load tasks failed: ${err.message}`)
-    }
-  }
-
-  const verifyAudit = async () => {
-    try {
-      const data = await request('/audit/verify')
-      setAudit(data)
-    } catch (err) {
-      setMessage(`Audit verify failed: ${err.message}`)
+      if (err instanceof ApiError && err.body?.task_id) {
+        setTaskDetails((prev) => ({ ...prev, [err.body.task_id]: { ...taskForm, ...err.body } }))
+      }
+      setAlertState(alertFromError(err))
+    } finally {
+      setSubmitting(false)
     }
   }
 
   const actOnTask = async (taskId, action) => {
+    setActingTaskId(taskId)
+    setAlertState(null)
     try {
-      await request(`/tasks/${taskId}/action`, {
-        method: 'POST',
-        body: JSON.stringify({ action }),
-      })
-      setMessage(`Task ${taskId} ${action}d`)
+      const data = await api.actOnTask(taskId, action)
+      setTaskDetails((prev) => ({ ...prev, [taskId]: { ...prev[taskId], ...data } }))
+      setAlertState({ tone: 'success', title: 'Task updated', message: `Task ${data.task_id} ${action}d.` })
       await refreshTasks()
       await verifyAudit()
     } catch (err) {
-      setMessage(`Action failed: ${err.message}`)
+      setAlertState(alertFromError(err))
+    } finally {
+      setActingTaskId('')
     }
   }
 
+  const selectedTask = tasks.find((t) => t.task_id === selectedTaskId)
+  const activeProvider = selectedTask?.provider
+
   return (
-    <main className="container">
-      <h1>AstroTask Secure Gateway Dashboard</h1>
-      <p className="subtitle">Simulated secure commercial satellite tasking workflow</p>
+    <AppShell role={role} gatewayOnline={Boolean(token)} onLogout={token ? logout : undefined}>
+      {alertState && <Alert {...alertState} onDismiss={() => setAlertState(null)} />}
 
-      <section className="panel">
-        <h2>Login</h2>
-        <div className="row">
-          <input value={credentials.username} onChange={(e) => setCredentials((s) => ({ ...s, username: e.target.value }))} placeholder="username" />
-          <input type="password" value={credentials.password} onChange={(e) => setCredentials((s) => ({ ...s, password: e.target.value }))} placeholder="password" />
-          <button onClick={login}>Login</button>
-          <button onClick={refreshTasks} disabled={!token}>Refresh Tasks</button>
-          <button onClick={verifyAudit} disabled={!token}>Verify Audit</button>
-        </div>
-      </section>
+      {!token && (
+        <LoginPanel credentials={credentials} onChange={setCredentials} onLogin={login} loading={loggingIn} />
+      )}
 
-      <section className="panel">
-        <h2>Create Task Request</h2>
-        <form className="grid" onSubmit={submitTask}>
-          {Object.entries(taskForm).map(([key, value]) => (
-            <label key={key}>
-              <span>{key}</span>
-              {['sensor_type', 'classification_level', 'commercial_provider_preference'].includes(key) ? (
-                <select value={value} onChange={(e) => setTaskForm((s) => ({ ...s, [key]: e.target.value }))}>
-                  {key === 'sensor_type' && ['EO', 'SAR', 'RF'].map((v) => <option key={v}>{v}</option>)}
-                  {key === 'classification_level' && ['CUI_IL5', 'SECRET_IL6'].map((v) => <option key={v}>{v}</option>)}
-                  {key === 'commercial_provider_preference' && ['Maxar', 'Planet', 'BlackSky', 'Umbra', 'ICEYE'].map((v) => <option key={v}>{v}</option>)}
-                </select>
-              ) : (
-                <input value={value} onChange={(e) => setTaskForm((s) => ({ ...s, [key]: e.target.value }))} />
-              )}
-            </label>
-          ))}
-          <button type="submit" disabled={!token}>Submit Task</button>
-        </form>
-      </section>
+      {token && (
+        <>
+          <MetricsRow tasks={tasks} audit={audit} />
 
-      <section className="panel">
-        <h2>Mission Tasks</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Status</th>
-              <th>Decision</th>
-              <th>Provider</th>
-              <th>Audit</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {tasks.map((task) => (
-              <tr key={task.task_id}>
-                <td>{task.task_id.slice(0, 8)}</td>
-                <td>{task.status}</td>
-                <td>{task.policy_decision}</td>
-                <td>{task.provider}</td>
-                <td>{task.audit_status}</td>
-                <td>
-                  {canApprove && (
-                    <>
-                      <button onClick={() => actOnTask(task.task_id, 'approve')}>Approve</button>
-                      <button onClick={() => actOnTask(task.task_id, 'deny')}>Deny</button>
-                      <button onClick={() => actOnTask(task.task_id, 'flag')}>Flag</button>
-                    </>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
+          <div className="layout-grid">
+            <SecurityPostureCard
+              role={role}
+              authenticated={Boolean(token)}
+              auditVerifiedAt={auditVerifiedAt}
+              auditValid={audit?.valid}
+            />
+            <ProviderHealthPanel tasks={tasks} />
+          </div>
 
-      <section className="panel">
-        <h2>Audit Status</h2>
-        <p>{audit ? `Valid: ${String(audit.valid)} | Records: ${audit.records_checked}` : 'Not checked yet'}</p>
-      </section>
+          <ArchitectureFlow activeProvider={activeProvider} />
 
-      <p className="message">{message}</p>
-    </main>
+          <div className="layout-grid layout-grid--form-table">
+            <TaskRequestForm
+              form={taskForm}
+              onChange={setTaskForm}
+              onSubmit={submitTask}
+              submitting={submitting}
+              disabled={!token}
+              role={role}
+            />
+            <div className="stack">
+              <div className="panel__actions-row">
+                <button type="button" className="button button--secondary" onClick={refreshTasks} disabled={loadingTasks}>
+                  {loadingTasks ? 'Refreshing…' : 'Refresh Tasks'}
+                </button>
+              </div>
+              <TaskTable
+                tasks={tasks}
+                taskDetails={taskDetails}
+                loading={loadingTasks}
+                error={tasksError}
+                onSelectTask={setSelectedTaskId}
+                selectedTaskId={selectedTaskId}
+                canApprove={canApprove}
+                onAction={actOnTask}
+                actingTaskId={actingTaskId}
+              />
+            </div>
+          </div>
+
+          <AuditPanel
+            audit={audit}
+            loading={verifyingAudit}
+            error={auditError}
+            onVerify={verifyAudit}
+            lastVerifiedAt={auditVerifiedAt}
+          />
+        </>
+      )}
+
+      {selectedTask && (
+        <TaskDetailDrawer
+          task={selectedTask}
+          detail={taskDetails[selectedTask.task_id]}
+          onClose={() => setSelectedTaskId('')}
+          onAction={actOnTask}
+          canApprove={canApprove}
+          acting={actingTaskId === selectedTask.task_id}
+        />
+      )}
+    </AppShell>
   )
 }
 
